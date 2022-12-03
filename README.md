@@ -1,9 +1,10 @@
-# Four Keys
+![Four Keys](images/fourkeys_wide.svg)
+
 [![Four Keys YouTube Video](images/youtube-screenshot.png)](https://www.youtube.com/watch?v=2rzvIL29Nz0 "Measuring Devops: The Four Keys Project")
 
 # Background
 
-Through six years of research, the [DevOps Research and Assessment (DORA)](https://cloud.google.com/blog/products/devops-sre/the-2019-accelerate-state-of-devops-elite-performance-productivity-and-scaling) team has identified four key metrics that indicate the performance of a software development team. Four Keys allows you to collect data from your development environment (such as GitHub or GitLab) and compiles it into a dashboard displaying these key metrics.
+Through six years of research, the [DevOps Research and Assessment (DORA)](https://cloud.google.com/blog/products/devops-sre/the-2019-accelerate-state-of-devops-elite-performance-productivity-and-scaling) team has identified four key metrics that indicate the performance of software delivery. Four Keys allows you to collect data from your development environment (such as GitHub or GitLab) and compiles it into a dashboard displaying these key metrics.
 
 These four key metrics are:
 
@@ -33,7 +34,7 @@ For a quick baseline of your team's software delivery performance, you can also 
 1.  Events are sent to a webhook target hosted on Cloud Run. Events are any occurrence in your development environment (for example, GitHub or GitLab) that can be measured, such as a pull request or new issue. Four Keys defines events to measure, and you can add others that are relevant to your project.
 1.  The Cloud Run target publishes all events to Pub/Sub.
 1.  A Cloud Run instance is subscribed to the Pub/Sub topics, does some light data transformation, and inputs the data into BigQuery.
-1.  Nightly scripts are scheduled in BigQuery to complete the data transformations and feed into the dashboard.
+1.  The BigQuery view to complete the data transformations and feed into the dashboard.
 
 This diagram shows the design of the Four Keys system:
 
@@ -43,19 +44,20 @@ This diagram shows the design of the Four Keys system:
 
 * `bq-workers/`
   * Contains the code for the individual BigQuery workers.  Each data source has its own worker service with the logic for parsing the data from the Pub/Sub message. For example, GitHub has its own worker which only looks at events pushed to the GitHub-Hookshot Pub/Sub topic
-* `connectors/`
-  * Contains the code for the DataStudio Connector which generates the Four Keys Dashboard
-* `data_generator/`
+* `dashboard/`
+  * Contains the code for the Grafana dashboard displaying the Four Keys metrics
+* `data-generator/`
   * Contains a Python script for generating mock GitHub or Gitlab data.
-* `event_handler/`
-  * Contains the code for the `event_handler`, which is the public service that accepts incoming webhooks.  
+* `event-handler/`
+  * Contains the code for the `event-handler`, which is the public service that accepts incoming webhooks.  
 * `queries/`
   * Contains the SQL queries for creating the derived tables.
-  * Contains a bash script for scheduling the queries.
 * `setup/`
   * Contains the code for setting up and tearing down the Four Keys pipeline. Also contains a script for extending the data sources.
 * `shared/`
   * Contains a shared module for inserting data into BigQuery, which is used by the `bq-workers`
+* `terraform/`
+  * Contains Terraform modules and submodules, and examples for deploying Four Keys using Terraform.
 
 # How to use 
 
@@ -65,12 +67,11 @@ _The project uses Python 3 and supports data extraction for Cloud Build and GitH
 
 1.  Fork this project.
 1.  Run the automation scripts, which does the following (See the [setup README](setup/README.md) for more details):
-    1.  Set up a new Google Cloud Project.
     1.  Create and deploy the Cloud Run webhook target and ETL workers.
     1.  Create the Pub/Sub topics and subscriptions.
     1.  Enable the Google Secret Manager and create a secret for your GitHub repo.
-    1.  Create a BigQuery dataset and tables, and schedule the nightly scripts.
-    1.  Open up a browser tab to connect your data to a DataStudio dashboard template.
+    1.  Create a BigQuery dataset, tables and views.
+    1.  Output a URL for the newly generated Grafana dashboard. 
 1.  Set up your development environment to send events to the webhook created in the second step.
     1.  Add the secret to your GitHub webhook.
 
@@ -99,7 +100,7 @@ To run outside of the setup script:
 1. Run the following command:
 
    ```sh
-   python3 data_generator/generate_data.py --vc_system=github
+   python3 data-generator/generate_data.py --vc_system=github
    ```
 
    You can see these events being run through the pipeline:
@@ -117,23 +118,22 @@ To run outside of the setup script:
 
 The scripts consider some events to be “changes”, “deploys”, and “incidents.” You may want to reclassify one or more of these events, for example, if you want to use a label for your incidents other than “incident.” To reclassify one of the events in the table, no changes are required on the architecture or code of the project.
 
-1.  Update the nightly scripts in BigQuery for the following tables:
+1.  Update the view in BigQuery for the following tables:
 
     *   `four_keys.changes`
     *   `four_keys.deployments`
     *   `four_keys.incidents`
 
-    To update the scripts, we recommend that you update the `sql` files in the `queries` folder, rather than in the BigQuery UI.
+    To update the view, we recommend that you update the `sql` files in the `queries` folder, rather than in the BigQuery UI.
 
-1.  Once you've edited the SQL, run the `schedule.sh` script to update the scheduled query that populates the table.  For example, if you wanted to update the `four_keys.changes` table, you'd run:
+1.  Once you've edited the SQL, run `terraform apply` to update the view that populates the table:
 
     ```sh 
-    schedule.sh --query_file=changes.sql --table=changes --project_id=$FOURKEYS_PROJECT
+    cd ./setup && terraform apply
     ```
 
 Notes: 
 
-* The `query_file` flag should contain the relative path of the file.  
 * To feed into the dashboard, the table name should be one of `changes`, `deployments`, `incidents`. 
 
 
@@ -215,7 +215,7 @@ The "name_of_session" will be something like "py-3.6(folder='.....').
    </td>
   </tr>
   <tr>
-   <td>🔑id
+   <td> <strong>id*</strong>
    </td>
    <td>STRING
    </td>
@@ -256,7 +256,7 @@ The "name_of_session" will be something like "py-3.6(folder='.....').
   </tr>
 </table>
 
-Where the key icon indicates that the ID is generated by the original system, such as GitHub.
+*indicates that the ID is generated by the original system, such as GitHub.
 
 This table will be used to create the following three derived tables: 
 
@@ -301,7 +301,6 @@ _Note: Deployments and changes have a many to one relationship.  Table only cont
   </tr>
 </table>
 
-Where the key icon indicates that the ID is generated by the original system, such as GitHub.
 
 #### `four_keys.changes`
 
@@ -341,7 +340,6 @@ Where the key icon indicates that the ID is generated by the original system, su
   </tr>
 </table>
 
-Where the key icon indicates that the ID is generated by the original system, such as GitHub.
 
 #### `four_keys.incidents`
 
@@ -389,7 +387,6 @@ Where the key icon indicates that the ID is generated by the original system, su
   </tr>
 </table>
 
-Where the key icon indicates that the ID is generated by the original system, such as GitHub.
 
 # Dashboard 
 

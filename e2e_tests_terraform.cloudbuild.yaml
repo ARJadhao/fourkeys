@@ -1,8 +1,41 @@
 steps:
     # remove any detritus left from prior runs
   - id: Clean
-    name: 'gcr.io/cloud-builders/gcloud'
-    args: ['builds','submit','--no-source','--config=e2e_tests_tf_cleanup.cloudbuild.yaml','--substitutions=_TARGET_PROJECT=$_TARGET_PROJECT']
+    name: gcr.io/$PROJECT_ID/fourkeys-builder
+    entrypoint: /bin/bash
+    args:
+      - '-c'
+      - |
+        ### Purge state using Terraform
+        
+        # configure remote terraform backend GCS
+        cat > backend.tf <<EOF
+        terraform {
+          backend "gcs" {
+            bucket  = "$_TARGET_PROJECT-tf-state"
+            prefix  = "terraform/state"
+          }
+        }
+        EOF
+
+        terraform init
+        TF_LOG=$_TF_LOG \
+        TF_VAR_google_project_id='$_TARGET_PROJECT' \
+        TF_VAR_google_region='us-central1' \
+        TF_VAR_bigquery_region='US' \
+        TF_VAR_parsers='["cloud-build","github"]' \
+        terraform destroy --auto-approve
+
+        ### Delete Terraform state
+        gsutil -m rm -r gs://$_TARGET_PROJECT-tf-state/terraform || true
+
+        ### Use gcloud to ensure all resources are gone
+        ./ci/project_cleaner.sh --project=$_TARGET_PROJECT || true
+
+        gcloud services disable compute.googleapis.com --project=$_TARGET_PROJECT --force
+        gcloud services disable run.googleapis.com --project=$_TARGET_PROJECT --force
+        gcloud services disable bigquery.googleapis.com --project=$_TARGET_PROJECT --force 
+        gcloud services disable secretmanager.googleapis.com --project=$_TARGET_PROJECT --force
 
   - id: Install
     name: 'gcr.io/$PROJECT_ID/fourkeys-builder'
@@ -31,6 +64,7 @@ steps:
         FOURKEYS_REGION='us-central1' \
         BIGQUERY_REGION='US' \
         GENERATE_DATA='yes' \
+        INCIDENT_SYSTEM='pagerduty' \
         TF_LOG=$_TF_LOG \
         TF_VAR_google_project_id='$_TARGET_PROJECT' \
         TF_VAR_google_region='us-central1' \
@@ -38,7 +72,7 @@ steps:
         TF_VAR_parsers='["cloud-build","github"]' \
         ./install.sh
 
-  - id: Check Tables are Populated
+  - id: Check Installation
     name: 'gcr.io/$PROJECT_ID/fourkeys-builder'
     entrypoint: /bin/bash
     args:
@@ -72,20 +106,16 @@ steps:
         'SELECT count(*) as vol FROM four_keys.incidents' | \
          python3 -c "$result_check"
 
-  - id: Tear Down Resources
-    name: 'gcr.io/$PROJECT_ID/fourkeys-builder'
-    entrypoint: /bin/bash
-    dir: "setup"
-    args:
-      - '-c'
-      - |
-        terraform init
-        TF_LOG=$_TF_LOG \
-        TF_VAR_google_project_id='$_TARGET_PROJECT' \
-        TF_VAR_google_region='us-central1' \
-        TF_VAR_bigquery_region='US' \
-        TF_VAR_parsers='["cloud-build","github"]' \
-        terraform destroy --auto-approve
+        echo "Checking connection to dashboard..."
+        DASHBOARD_URL="$(terraform output -raw dashboard_endpoint)"
+        DASHBOARD_HTTP_RESPONSE_CODE=$(curl -LI $${DASHBOARD_URL} -o /dev/null -w '%{http_code}\n' -s)
+        if [ $${DASHBOARD_HTTP_RESPONSE_CODE} == "200" ]; then 
+            echo "success" 
+        else
+            echo "Error validating dashboard URL; received $${DASHBOARD_HTTP_RESPONSE_CODE} from $${DASHBOARD_URL}"
+            exit 1
+        fi
+         
 substitutions:
   _TF_LOG: ERROR
   _TARGET_PROJECT: fourkeys-tf-tests

@@ -7,16 +7,32 @@ WITH deploys_cloudbuild_github_gitlab AS (# Cloud Build, Github, Gitlab pipeline
       time_created,
       CASE WHEN source = "cloud_build" then JSON_EXTRACT_SCALAR(metadata, '$.substitutions.COMMIT_SHA')
            WHEN source like "github%" then JSON_EXTRACT_SCALAR(metadata, '$.deployment.sha')
-           WHEN source like "gitlab%" then JSON_EXTRACT_SCALAR(metadata, '$.commit.id') end as main_commit,
+           WHEN source like "gitlab%" then COALESCE(
+                                    # Data structure from GitLab Pipelines
+                                    JSON_EXTRACT_SCALAR(metadata, '$.commit.id'),
+                                    # Data structure from GitLab Deployments
+                                    # REGEX to get the commit sha from the URL
+                                    REGEXP_EXTRACT(
+                                      JSON_EXTRACT_SCALAR(metadata, '$.commit_url'), r".*commit\/(.*)")
+                                      )
+           WHEN source = "argocd" then JSON_EXTRACT_SCALAR(metadata, '$.commit_sha') end as main_commit,
       CASE WHEN source LIKE "github%" THEN ARRAY(
                 SELECT JSON_EXTRACT_SCALAR(string_element, '$')
                 FROM UNNEST(JSON_EXTRACT_ARRAY(metadata, '$.deployment.additional_sha')) AS string_element)
            ELSE ARRAY<string>[] end as additional_commits
       FROM four_keys.events_raw 
-      WHERE ((source = "cloud_build"
-      AND JSON_EXTRACT_SCALAR(metadata, '$.status') = "SUCCESS")
+      WHERE (
+      # Cloud Build Deployments
+         (source = "cloud_build" AND JSON_EXTRACT_SCALAR(metadata, '$.status') = "SUCCESS")
+      # GitHub Deployments
       OR (source LIKE "github%" and event_type = "deployment_status" and JSON_EXTRACT_SCALAR(metadata, '$.deployment_status.state') = "success")
-      OR (source LIKE "gitlab%" and event_type = "pipeline" and JSON_EXTRACT_SCALAR(metadata, '$.object_attributes.status') = "success"))
+      # GitLab Pipelines 
+      OR (source LIKE "gitlab%" AND event_type = "pipeline" AND JSON_EXTRACT_SCALAR(metadata, '$.object_attributes.status') = "success")
+      # GitLab Deployments 
+      OR (source LIKE "gitlab%" AND event_type = "deployment" AND JSON_EXTRACT_SCALAR(metadata, '$.status') = "success")
+      # ArgoCD Deployments
+      OR (source = "argocd" AND JSON_EXTRACT_SCALAR(metadata, '$.status') = "SUCCESS")
+      )
     ),
     deploys_tekton AS (# Tekton Pipelines
       SELECT
@@ -35,11 +51,23 @@ WITH deploys_cloudbuild_github_gitlab AS (# Cloud Build, Github, Gitlab pipeline
       WHERE event_type = "dev.tekton.event.pipelinerun.successful.v1" 
       AND metadata like "%gitrevision%") e, e.params as param
     ),
+    deploys_circleci AS (# CircleCI pipelines
+      SELECT
+      source,
+      id AS deploy_id,
+      time_created,
+      JSON_EXTRACT_SCALAR(metadata, '$.pipeline.vcs.revision') AS main_commit,
+      ARRAY<string>[] AS additional_commits
+      FROM four_keys.events_raw
+      WHERE (source = "circleci" AND event_type = "workflow-completed" AND JSON_EXTRACT_SCALAR(metadata, '$.workflow.name') LIKE "%deploy%" AND JSON_EXTRACT_SCALAR(metadata, '$.workflow.status') = "success")
+    ),
     deploys AS (
       SELECT * FROM
       deploys_cloudbuild_github_gitlab
       UNION ALL
       SELECT * FROM deploys_tekton
+      UNION ALL
+      SELECT * FROM deploys_circleci
     ),
     changes_raw AS (
       SELECT
